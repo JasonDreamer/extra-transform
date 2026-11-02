@@ -1,39 +1,39 @@
 # Extra Transform
 
-Blender add-on that stacks any number of Delta Transform layers on an object.
+オブジェクトに Delta Transform を何層でも重ねられる Blender アドオンです。
 
-Each layer behaves exactly like Blender's own Delta Transform. Layers added later apply further out. Everything stays on the object itself: no Empties, no helper objects.
+各レイヤーは Blender 標準の Delta Transform とまったく同じ動きをします。あとから足したレイヤーほど外側にかかります。Empty や補助オブジェクトは使わず、オブジェクトの中だけで完結します。
 
-Requires Blender 5.2 or later.
+Blender 5.2 以降が必要です。
 
-## Install
+## インストール
 
-1. Download `extra_transform-<version>.zip` from Releases.
-2. In Blender, open Edit > Preferences > Get Extensions, choose Install from Disk in the ▾ menu, and pick the zip.
+1. Releases から `extra_transform-<バージョン>.zip` をダウンロードします。
+2. Blender で 編集 > プリファレンス > エクステンションを入手 を開き、右上の ▾ メニューから「ディスクからインストール」を選んで zip を指定します。
 
-## Use
+## 使い方
 
-Object Properties > Transform > Delta Transform. Press **Add Transform** to add a layer. If the object already has a delta, it becomes the first layer.
+オブジェクトプロパティ > トランスフォーム > デルタトランスフォーム を開き、**Add Transform** でレイヤーを追加します。オブジェクトにすでにデルタの値が入っている場合は、それが1枚目のレイヤーになります。
 
-Each layer has Location, Rotation (in the object's rotation mode) and Scale, and can be keyed. Keyed channels appear in the Graph Editor under Object Transforms as `Extra 1 Location`, `Extra 2 Euler Rotation` and so on, numbered by position in the stack.
+各レイヤーには位置・回転（オブジェクトの回転モードに従う）・スケールがあり、キーフレームも打てます。キーを打ったチャンネルはグラフエディターの Object Transforms の中に `Extra 1 Location`、`Extra 2 Euler Rotation` のような名前で並びます。番号はスタック内の位置です。
 
-The layer menu offers Duplicate, Merge Up, Move and Remove. Below the stack:
+レイヤーのメニューからは 複製・上と統合（Merge Up）・上下移動・削除 ができます。スタックの下には次のボタンがあります。
 
-- **Apply to Transform** bakes all layers into Location / Rotation / Scale.
-- **Bake to Delta** writes the current result into the native Delta and removes the layers.
+- **Apply to Transform**: 全レイヤーを位置・回転・スケールに焼き込みます。
+- **Bake to Delta**: 現在の結果を標準のデルタに書き込み、レイヤーを削除します。
 
-Native operators such as Ctrl+A, Alt+G/R/S and Transforms to Deltas work as they do with a plain Delta.
+Ctrl+A、Alt+G/R/S、「トランスフォームをデルタに」などの標準の操作も、普通のデルタと同じように使えます。
 
-## How it works
+## 仕組み
 
-The layers are composed into the native Delta channels with drivers. Location is a sum, scale is a product. Rotation with one layer is passed through; with several layers it goes through a driver function the add-on registers. A file saved with several rotation layers therefore needs the add-on installed to show the right rotation.
+レイヤーはドライバーで標準のデルタのチャンネルに合成しています。位置は和、スケールは積です。回転はレイヤーが1枚ならそのまま渡し、複数ならアドオンが登録する関数を通して合成します。そのため、回転レイヤーが複数あるファイルを正しく表示するにはアドオンが入っている必要があります。
 
-## Tests
+## テスト
 
 ```
 blender -b --factory-startup --python tests/test_parity.py
 ```
 
-## License
+## ライセンス
 
 GPL-3.0-or-later
