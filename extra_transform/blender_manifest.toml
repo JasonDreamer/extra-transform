@@ -4,7 +4,7 @@ id = "extra_transform"
 version = "1.0.0"
 name = "Extra Transform"
 tagline = "Stack any number of Delta Transforms on an object"
-maintainer = "mikan"
+maintainer = "Jason"
 type = "add-on"
 
 blender_version_min = "5.2.0"
