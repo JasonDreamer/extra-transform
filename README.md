@@ -1,32 +1,34 @@
 # Extra Transform
 
-オブジェクトに Delta Transform を何層でも重ねられる Blender アドオンです。
+English | [日本語](README.ja.md)
 
-## 機能
+A Blender add-on that stacks any number of Delta Transforms on an object.
 
-- 各レイヤーは標準の Delta Transform と同じ計算で動きます。後から追加したレイヤーほど外側にかかります
-- Empty などの補助オブジェクトは作りません
-- 複製、上のレイヤーとの統合、並べ替え、無効化ができます
-- 全レイヤーを Transform や標準の Delta に焼き込めます
-- Ctrl+A などの標準の操作はそのまま使えます
+## Features
 
-## 動作環境
+- Each layer is computed exactly like the built-in Delta Transform. Layers added later apply further out
+- No Empties or helper objects
+- Duplicate, merge into the layer above, reorder, and disable layers
+- Bake all layers into the Transform or into the built-in Delta
+- Built-in operators such as Ctrl+A keep working
 
-Blender 5.2 以降
+## Requirements
 
-## インストール
+Blender 5.2 or later
 
-1. [Releases](https://github.com/JasonDreamer/extra-transform/releases) から zip をダウンロードします
-2. Blender の 編集 > プリファレンス > エクステンションを入手 を開き、右上の ▾ から「ディスクからインストール」で zip を選びます
+## Installation
 
-## 使い方
+1. Download the zip from [Releases](https://github.com/JasonDreamer/extra-transform/releases)
+2. In Blender, open Edit > Preferences > Get Extensions, then choose Install from Disk in the ▾ menu at the top right and select the zip
 
-オブジェクトプロパティ > トランスフォーム > デルタトランスフォーム にある Add Transform を押すと、レイヤーが追加されます。すでに Delta に値が入っている場合は、その値が1枚目のレイヤーになります。
+## Usage
 
-## 注意
+Press Add Transform under Object Properties > Transform > Delta Transform to add a layer. If the Delta already has values, they become the first layer.
 
-回転のレイヤーが2枚以上あるファイルは、アドオンを入れていない環境で開くと回転が正しく表示されません。
+## Note
 
-## ライセンス
+If a file has two or more rotation layers, the rotation is wrong when the file is opened without the add-on installed.
+
+## License
 
 GPL-3.0-or-later
