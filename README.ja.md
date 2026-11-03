@@ -29,6 +29,10 @@ Blender 5.2 以降
 
 回転のレイヤーが2枚以上あるファイルは、アドオンを入れていない環境で開くと回転が正しく表示されません。
 
+## 仕組み
+
+[docs/how-it-works.ja.md](docs/how-it-works.ja.md) を参照してください。
+
 ## ライセンス
 
 GPL-3.0-or-later

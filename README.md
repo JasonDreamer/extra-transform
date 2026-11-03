@@ -29,6 +29,10 @@ Press Add Transform under Object Properties > Transform > Delta Transform to add
 
 If a file has two or more rotation layers, the rotation is wrong when the file is opened without the add-on installed.
 
+## How it works
+
+See [docs/how-it-works.md](docs/how-it-works.md).
+
 ## License
 
 GPL-3.0-or-later
