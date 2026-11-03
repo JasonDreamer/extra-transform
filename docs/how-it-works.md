@@ -4,48 +4,36 @@ English | [日本語](how-it-works.ja.md)
 
 ## Composition
 
-Drivers write the layer values into the object's own Delta Transform (`delta_location`, `delta_rotation_euler`, `delta_rotation_quaternion`, `delta_scale`). Blender computes the final transform from those as usual, so with one layer the result is identical to the built-in Delta.
+Drivers feed the layer values into the object's own Delta (`delta_location` and friends). Blender builds the final matrix from the Delta as usual, so a single layer gives the same result as the built-in Delta.
 
-With several layers, each channel is composed on its own:
+With more layers, location adds up, scale multiplies per axis, and rotation multiplies as rotation matrices, with later layers applied from the outside (on the left). In Quaternion mode the quaternions are multiplied instead.
 
-| Channel | Composition |
-| --- | --- |
-| Location | Sum of all layers |
-| Scale | Product of all layers, per axis |
-| Rotation | Product of rotation matrices (quaternions in Quaternion mode). Later layers multiply from the left |
+Each channel is composed separately, so rotating an outer layer does not swing an inner layer's location around. Stacking parented Empties would give a different result here.
 
-Because composition is per channel, an outer layer's rotation or scale does not affect an inner layer's location. This is where it differs from stacking parented Empties.
+Rotation follows the object's rotation mode, and changing the mode rebuilds the drivers. Axis Angle has no delta rotation, so only location and scale are composed in that mode.
 
-Rotation is read in the object's rotation mode, and the drivers are rebuilt when the mode changes. Axis Angle mode has no delta rotation, so rotation is not composed there (location and scale still are).
+## Where values are stored
 
-Disabled layers are left out.
+Layer values are custom properties on the object, named `Extra 1 Location`, `Extra 2 Euler Rotation` and so on. The number is the layer's position in the stack; reordering renames the properties and their keyframe paths.
 
-## Where the data lives
-
-Layer values are custom properties on the object, named like `Extra 1 Location` or `Extra 2 Euler Rotation`. The number is the layer's position in the stack. Reordering renames the properties and remaps their keyframe paths. Keyed channels go into the Object Transforms group in the Graph Editor.
-
-The values are custom properties because drivers that read add-on properties (`bpy.props`) create a dependency cycle.
+They are not add-on properties (`bpy.props`) because a driver reading one of those causes a dependency cycle.
 
 ## Drivers
 
-Every driver reads the layer values directly and writes a native Delta channel. No driver reads another driver's result: in Blender 5.2, a driver that writes a custom property occasionally loses its result under threaded evaluation.
+Each driver reads layer values and writes a Delta channel, nothing more. Chaining drivers through custom properties is avoided because Blender 5.2's threaded evaluation now and then drops a driver's write to a custom property.
 
-- Location: a SUM driver
-- Scale: an `a*b*c...` expression (the 100-layer limit comes from this expression's length)
-- Rotation, one layer: the input is passed through
-- Rotation, two or more layers: a function, `extra_transform_rotation`, that the add-on registers in `bpy.app.driver_namespace`
+Location uses a SUM driver and scale an `a*b*c...` expression; the 100-layer limit comes from that expression's length limit. Rotation with one layer is passed straight through. With two or more, the add-on registers an `extra_transform_rotation` function in `bpy.app.driver_namespace` and the drivers call it.
 
-A file with two or more rotation layers shows the wrong rotation when opened without the add-on, because that function is missing. Location and scale are plain expressions and work without it.
+Without the add-on that function doesn't exist, so a file with two or more rotation layers shows the wrong rotation. Location and scale still work.
 
-## Built-in operators
+## Ctrl+A and other built-in operators
 
-Ctrl+A, Alt+G/R/S, Transforms to Deltas and similar operators write the native Delta directly, and the drivers would overwrite that on the next evaluation. So after each evaluation the add-on remembers the Delta values. If they changed before the next evaluation, it treats that as an outside write and folds it back into the layers:
+Ctrl+A, Alt+G/R/S and Transforms to Deltas write to the Delta directly, and the drivers would overwrite that on the next evaluation. So the add-on notes the Delta values after every evaluation, and if they have changed by the next one, it writes the difference back into the layers.
 
-- A channel written to its identity value (location 0, rotation 0, scale 1) resets that channel in every layer
-- Any other value goes into the outermost layer, with the composition of the inner layers taken out
+A channel set to 0 (1 for scale) is reset in every layer. Any other value goes into the outermost layer, minus what the inner layers contribute.
 
-Undo and file loads discard the remembered values.
+Undo and opening a file throw away the noted values.
 
-## Existing Delta
+## Objects that already use Delta
 
-When you add a layer to an object whose Delta already has values, animation or drivers, they move into a first layer named "Delta".
+Adding a layer to an object whose Delta already has values, animation or drivers moves all of that into a first layer called "Delta".
