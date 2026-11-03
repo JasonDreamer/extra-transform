@@ -6,7 +6,13 @@ English | [日本語](how-it-works.ja.md)
 
 Drivers feed the layer values into the object's own Delta (`delta_location` and friends). Blender builds the final matrix from the Delta as usual, so a single layer gives the same result as the built-in Delta.
 
-With more layers, location adds up, scale multiplies per axis, and rotation multiplies as rotation matrices, with later layers applied from the outside (on the left). In Quaternion mode the quaternions are multiplied instead.
+With more layers:
+
+| Channel | Composition |
+| --- | --- |
+| Location | Sum |
+| Scale | Product, per axis |
+| Rotation | Product of rotation matrices (quaternions in Quaternion mode). Later layers apply from the outside (on the left) |
 
 Each channel is composed separately, so rotating an outer layer does not swing an inner layer's location around. Stacking parented Empties would give a different result here.
 
@@ -22,7 +28,10 @@ They are not add-on properties (`bpy.props`) because a driver reading one of tho
 
 Each driver reads layer values and writes a Delta channel, nothing more. Chaining drivers through custom properties is avoided because Blender 5.2's threaded evaluation now and then drops a driver's write to a custom property.
 
-Location uses a SUM driver and scale an `a*b*c...` expression; the 100-layer limit comes from that expression's length limit. Rotation with one layer is passed straight through. With two or more, the add-on registers an `extra_transform_rotation` function in `bpy.app.driver_namespace` and the drivers call it.
+- Location: a SUM driver
+- Scale: an `a*b*c...` expression. The 100-layer limit comes from this expression's length limit
+- Rotation, one layer: the input is passed straight through
+- Rotation, two or more layers: an `extra_transform_rotation` function that the add-on registers in `bpy.app.driver_namespace`
 
 Without the add-on that function doesn't exist, so a file with two or more rotation layers shows the wrong rotation. Location and scale still work.
 
