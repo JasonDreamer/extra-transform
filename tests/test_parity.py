@@ -162,20 +162,18 @@ def stacks_match_closed_form():
 
 
 @test
-def all_drivers_are_valid_and_single_hop():
-    # Runs with Python auto-execution off (factory default), so a namespace-function
-    # driver that Blender refused would show up as invalid here.
+def all_drivers_are_simple_and_single_hop():
+    # Anything but a simple expression is blocked in files opened with auto-execution off.
     bad = []
     for ob in bpy.data.objects:
         if ob.animation_data:
             for fc in ob.animation_data.drivers:
                 d = fc.driver
-                calls_function = d.expression.startswith(stack.ROTATION_FUNCTION)
-                simple = d.type == 'SUM' or d.is_simple_expression or calls_function
+                simple = d.type == 'SUM' or d.is_simple_expression
                 reads_driven = any(f'["{stack.LEGACY_GROUP}"]' in v.targets[0].data_path for v in d.variables)
                 if not (d.is_valid and simple and fc.data_path in stack.DELTA_PATHS and not reads_driven):
                     bad.append((ob.name, fc.data_path, d.type, d.expression[:40]))
-    check("every driver is valid and writes a native Delta channel", not bad, str(bad[:3]))
+    check("every driver is a simple expression writing a native Delta channel", not bad, str(bad[:3]))
 
 
 @test
@@ -534,6 +532,114 @@ def files_from_0_1_0_are_renamed():
     check("legacy names migrate on the next update",
           not any(k.startswith("et_") for k in ob.keys()) and paths == ['["Extra 2 Euler Rotation"]'] * 3
           and diff(evaluated(ob).matrix_basis, reference(ob, vals)) < TOL, str(paths))
+
+
+CHILD = """
+import json, os, sys, bpy
+if WITH_ADDON:
+    sys.path.insert(0, ROOT)
+    import extra_transform
+    extra_transform.register()
+bpy.context.view_layer.update()
+dg = bpy.context.evaluated_depsgraph_get()
+out = {"autoexec_fail": bpy.app.autoexec_fail,
+       "m": {n: [list(r) for r in bpy.data.objects[n].evaluated_get(dg).matrix_world] for n in NAMES}}
+print("RESULT " + json.dumps(out))
+sys.stdout.flush()
+os._exit(0)
+"""
+
+
+@test
+def files_open_cleanly_with_auto_execution_off():
+    import json
+    import subprocess
+    import tempfile
+    obs = []
+    for mode in ('XYZ', 'ZXY', 'QUATERNION'):
+        for count in (1, 3):
+            ob = new_object(mode)
+            randomize_base(ob)
+            for _ in range(count):
+                add_layer(ob, rand_values())
+            obs.append(ob)
+    update()
+    want = {ob.name: evaluated(ob).matrix_world.copy() for ob in obs}
+    path = os.path.join(tempfile.mkdtemp(), "roundtrip.blend")
+    bpy.ops.wm.save_as_mainfile(filepath=path, copy=True)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for with_addon in (True, False):
+        label = "with add-on" if with_addon else "without add-on"
+        expr = f"WITH_ADDON={with_addon}\nROOT={root!r}\nNAMES={list(want)!r}\n" + CHILD
+        run = subprocess.run([bpy.app.binary_path, "-b", "--factory-startup", "--disable-autoexec", path,
+                              "--python-expr", expr], capture_output=True, text=True, timeout=120)
+        line = next((l for l in run.stdout.splitlines() if l.startswith("RESULT ")), None)
+        if line is None:
+            check(f"reopened file reports [{label}]", False, run.stdout[-300:] + run.stderr[-300:])
+            continue
+        out = json.loads(line[7:])
+        worst = max(diff(want[n], out["m"][n]) for n in want)
+        blocked = out["autoexec_fail"] or "restricted access" in run.stdout + run.stderr
+        check(f"no auto-execution warning, same pose [{label}]", not blocked and worst < TOL,
+              f"blocked={blocked} max diff {worst:.3g}")
+
+
+@test
+def files_from_1_0_0_lose_the_python_driver():
+    ob = new_object('YZX')
+    add_layer(ob, rand_values())
+    add_layer(ob, rand_values())
+    stack.reset_delta(ob)
+    sources = [p for l in ob.extra_transform.layers for p in stack.input_paths(l, "rot")]
+    for k in range(3):
+        stack._drive(ob, "delta_rotation_euler", k, f"{stack.LEGACY_ROTATION_FUNCTION}(self,{k})",
+                     [(f"v{n}", p) for n, p in enumerate(sources)], use_self=True)
+    check("1.0.0 driver set up", stack.has_legacy_drivers(ob))
+    extra_transform._upgrade()
+    update()
+    vals = [stack.read_inputs(ob, l) for l in ob.extra_transform.layers]
+    check("1.0.0 rotation driver is replaced on load",
+          not stack.has_legacy_drivers(ob) and diff(evaluated(ob).matrix_basis, reference(ob, vals)) < TOL)
+
+
+@test
+def rendered_frames_use_the_animated_rotation():
+    import tempfile
+    scene = bpy.context.scene
+    ob = new_object('ZXY')
+    randomize_base(ob)
+    add_layer(ob, rand_values())
+    add_layer(ob, rand_values())
+    key = stack.input_key(ob.extra_transform.layers[1], "rot")
+    for frame, val in ((1, 0.0), (4, 2.5)):
+        ob[key] = [val, -val, val * 0.5]
+        ob.keyframe_insert(f'["{key}"]', frame=frame)
+    scene.frame_set(1)
+    rendered = {}
+
+    def grab(scene, depsgraph):
+        ev = ob.evaluated_get(depsgraph)
+        vals = [{ch: list(ev[stack.input_key(l, ch)]) for ch in stack.INPUTS} for l in ob.extra_transform.layers]
+        if depsgraph.mode == 'RENDER':  # the viewport also returns to the start frame afterwards
+            rendered[scene.frame_current] = diff(ev.matrix_basis, reference(ob, vals))
+
+    render = scene.render
+    saved = (render.engine, render.resolution_x, render.resolution_y, scene.frame_start, scene.frame_end, render.filepath)
+    render.engine = 'BLENDER_WORKBENCH'
+    render.resolution_x = render.resolution_y = 8
+    scene.frame_start, scene.frame_end = 1, 4
+    render.filepath = os.path.join(tempfile.mkdtemp(), "f")
+    bpy.app.handlers.frame_change_post.append(grab)
+    try:
+        bpy.ops.render.render(animation=True)
+    finally:
+        bpy.app.handlers.frame_change_post.remove(grab)
+        (render.engine, render.resolution_x, render.resolution_y,
+         scene.frame_start, scene.frame_end, render.filepath) = saved
+    worst = max(rendered.values(), default=1.0)
+    check("each rendered frame has its own rotation", sorted(rendered) == [1, 2, 3, 4] and worst < TOL,
+          f"frames {sorted(rendered)} max diff {worst:.3g}")
+    scene.frame_set(1)
 
 
 print(f"\n{len(failures)} failure(s)" + (f": {failures}" if failures else ""))

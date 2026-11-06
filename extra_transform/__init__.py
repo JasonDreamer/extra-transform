@@ -46,10 +46,9 @@ _changed_in_pre = set()
 
 @persistent
 def _on_depsgraph_update_pre(scene, depsgraph):
+    frame = scene.frame_current_final
     for ob in _layered_objects():
         seen = stack.expected.get(ob.session_uid)
-        if seen is None and not _needs_rebuild(ob):
-            continue
         now = stack.delta_snapshot(ob)
         if _needs_rebuild(ob):
             stack.rebuild(ob)
@@ -57,6 +56,9 @@ def _on_depsgraph_update_pre(scene, depsgraph):
         if seen is not None and now != seen:
             stack.absorb_delta_write(ob, seen, now)
             stack.expected.pop(ob.session_uid, None)
+            _changed_in_pre.add(ob.session_uid)
+        # Layer edits (UI, scripts, the absorb above) change the composed rotation.
+        if stack.sync_rotation(ob, frame):
             _changed_in_pre.add(ob.session_uid)
 
 
@@ -77,6 +79,14 @@ def _on_depsgraph_update_post(scene, depsgraph):
 
 
 @persistent
+def _on_frame_change_pre(scene, depsgraph):
+    # Runs for playback, scrubbing and every rendered frame, before animation is evaluated.
+    frame = scene.frame_current_final
+    for ob in _layered_objects():
+        stack.sync_rotation(ob, frame)
+
+
+@persistent
 def _on_frame_change_post(scene, depsgraph):
     _remember_evaluated_delta(depsgraph)
 
@@ -88,29 +98,40 @@ def _forget(*args):
 
 
 @persistent
-def _install_driver_function(*args):
-    bpy.app.driver_namespace[stack.ROTATION_FUNCTION] = stack.evaluate_rotation
+def _upgrade(*args):
+    # Files from 1.0.0 compose rotation in a Python driver, which Blender blocks when
+    # auto-execution is off. Replace it; the warning is gone once the file is saved again.
+    try:
+        objects = _layered_objects()
+    except AttributeError:
+        return  # bpy.data is restricted while add-ons load at startup; load_post follows
+    for ob in objects:
+        if stack.has_legacy_drivers(ob):
+            stack.rebuild(ob)
+        else:
+            stack.sync_rotation(ob, stack.scene_frame())
 
 
 HANDLERS = (
     ("depsgraph_update_pre", _on_depsgraph_update_pre),
     ("depsgraph_update_post", _on_depsgraph_update_post),
+    ("frame_change_pre", _on_frame_change_pre),
     ("frame_change_post", _on_frame_change_post),
     ("undo_pre", _forget),
     ("redo_pre", _forget),
     ("undo_post", _forget),
     ("redo_post", _forget),
     ("load_pre", _forget),
-    ("load_post", _install_driver_function),
+    ("load_post", _upgrade),
 )
 
 
 def register():
     for m in modules:
         m.register()
-    _install_driver_function()
     for name, fn in HANDLERS:
         getattr(bpy.app.handlers, name).append(fn)
+    _upgrade()
 
 
 def unregister():
@@ -118,7 +139,6 @@ def unregister():
         handlers = getattr(bpy.app.handlers, name)
         if fn in handlers:
             handlers.remove(fn)
-    bpy.app.driver_namespace.pop(stack.ROTATION_FUNCTION, None)
     stack.expected.clear()
     for m in reversed(modules):
         m.unregister()

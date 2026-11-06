@@ -1,9 +1,13 @@
-# Layer storage and the drivers that fold all layers into the native Delta channels.
+# Layer storage, and how all layers are folded into the native Delta channels.
 #
 # Layer inputs are top-level custom properties: the UI can draw them, they can be
 # keyed, and each gets its own ID_PROPERTY depsgraph node. Drivers must never read
 # add-on (bpy.props) properties: those resolve to the object's PARAMETERS_EVAL node,
 # and driving anything on the same object from them creates a dependency cycle.
+#
+# Location, scale and single-layer rotation are simple-expression drivers. Composing
+# two or more rotations does not fit one, and a Python driver is blocked in files
+# opened with auto-execution off, so that case is written by the add-on's handlers.
 
 import math
 import uuid
@@ -340,27 +344,72 @@ def clear_drivers(ob):
         ad.drivers.remove(fc)
 
 
-ROTATION_FUNCTION = "extra_transform_rotation"
+# 1.0.0 composed rotation in a Python driver calling this function.
+LEGACY_ROTATION_FUNCTION = "extra_transform_rotation"
 
 
-def evaluate_rotation(ob, k):
-    """Component k of the composed delta rotation. Called from drivers with the evaluated object."""
+def has_legacy_drivers(ob):
+    ad = ob.animation_data
+    return bool(ad) and any(fc.driver.expression.startswith(LEGACY_ROTATION_FUNCTION) for fc in ad.drivers)
+
+
+def handles_rotation(ob):
+    """True when the composed rotation is written by the add-on instead of a driver."""
+    return ob.rotation_mode != 'AXIS_ANGLE' and sum(l.enabled for l in ob.extra_transform.layers) > 1
+
+
+def scene_frame():
+    scene = getattr(bpy.context, "scene", None)
+    return scene.frame_current_final if scene else None
+
+
+def _input_at(ob, layer, ch, frame, curves):
+    # Animated components are read from their F-Curves at `frame`: frame_change_pre runs
+    # before animation is evaluated, so the property still holds the previous frame.
+    values = list(ob[input_key(layer, ch)])
+    path = input_path(layer, ch)
+    for k in range(len(values)):
+        fc = curves.get((path, k))
+        if fc and not fc.mute:
+            values[k] = fc.evaluate(frame)
+    return values
+
+
+def composed_rotation(ob, frame=None):
+    """(Delta property, value) for the composition of all enabled layers' rotations."""
     layers = [l for l in ob.extra_transform.layers if l.enabled]
     mode = ob.rotation_mode
+    curves = {} if frame is None else {(fc.data_path, fc.array_index): fc for fc in _fcurves(ob)}
     if mode == 'QUATERNION':
         q = Quaternion()
         for l in layers:
-            q = _normalized_quat(ob[input_key(l, "quat")]) @ q
-        return q[k]
+            q = _normalized_quat(_input_at(ob, l, "quat", frame, curves)) @ q
+        return "delta_rotation_quaternion", q
     m = Matrix.Identity(3)
     for l in layers:
-        m = Euler(ob[input_key(l, "rot")], mode).to_matrix() @ m
-    return m.to_euler(mode)[k]
+        m = Euler(_input_at(ob, l, "rot", frame, curves), mode).to_matrix() @ m
+    return "delta_rotation_euler", m.to_euler(mode)
+
+
+def sync_rotation(ob, frame=None):
+    """Write the composed rotation into the Delta. Returns True if it changed."""
+    if not handles_rotation(ob):
+        return False
+    path, value = composed_rotation(ob, frame)
+    target = getattr(ob, path)
+    old = target[:]
+    target[:] = value
+    if target[:] == old:  # compare after the float32 round trip
+        return False
+    if ob.session_uid in expected:
+        expected[ob.session_uid] = delta_snapshot(ob)
+    return True
 
 
 def rebuild(ob):
     """Recreate every driver from the current layer list and rotation mode.
 
+    With two or more layers the rotation has no driver; sync_rotation() writes it.
     Every driver reads the layer inputs directly and writes a native Delta channel.
     Chaining drivers through driven custom properties is not reliable in Blender 5.2:
     under threaded evaluation a driver writing a custom property occasionally keeps
@@ -401,13 +450,8 @@ def rebuild(ob):
             _drive(ob, target, k, "v", [("v", src)])
         return
 
-    # Several layers: composing rotations does not fit a simple expression, so a registered
-    # function does it. Namespace functions still run with Python auto-execution disabled.
-    # The variables are unused by the expression; they give the depsgraph its relations.
-    sources = [p for l in layers for p in input_paths(l, ch)]
-    for k in range(len(INPUTS[ch][0])):
-        _drive(ob, target, k, f"{ROTATION_FUNCTION}(self,{k})",
-               [(f"v{n}", p) for n, p in enumerate(sources)], use_self=True)
+    # Several layers: the handlers keep it current from here on (see the header).
+    sync_rotation(ob, scene_frame())
 
 
 # ---------------------------------------------------------------------------

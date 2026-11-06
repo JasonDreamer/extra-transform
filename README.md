@@ -27,7 +27,7 @@ Press Add Transform under Object Properties > Transform > Delta Transform to add
 
 ## Note
 
-If a file has two or more rotation layers, the rotation is wrong when the file is opened without the add-on installed.
+If a file with two or more rotation layers is opened without the add-on, the rotation stays at its saved value and does not animate.
 
 ## How it works
 
