@@ -2,12 +2,13 @@
 
 English | [日本語](README.ja.md)
 
-A Blender add-on that stacks any number of Delta Transforms on an object.
+A Blender add-on that stacks up to 20 Delta Transforms on an object.
 
 ## Features
 
 - Each layer is computed exactly like the built-in Delta Transform. Layers added later apply further out
 - No Empties or helper objects
+- Adjust each layer's influence from 0 to 1
 - Duplicate, merge into the layer above, reorder, and disable layers
 - Bake all layers into the Transform or into the built-in Delta
 - Built-in operators such as Ctrl+A keep working

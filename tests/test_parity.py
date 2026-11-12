@@ -48,13 +48,20 @@ def new_object(mode='XYZ'):
     return ob
 
 
-def rand_values():
+def rand_values(weighted=False):
     return {
         "loc": [rng.uniform(-5, 5) for _ in range(3)],
         "rot": [rng.uniform(-7, 7) for _ in range(3)],
         "quat": [rng.uniform(-1, 1) for _ in range(4)],
         "scale": [rng.uniform(-2, 2) or 1.0 for _ in range(3)],
+        "influence": rng.uniform(0.2, 1.0) if weighted else 1.0,
     }
+
+
+def layer_values(o, layer):
+    """A layer's inputs as read from an original or evaluated object."""
+    return {ch: (list(o[stack.input_key(layer, ch)]) if stack.is_array(ch) else o[stack.input_key(layer, ch)])
+            for ch in stack.INPUTS}
 
 
 def randomize_base(ob):
@@ -77,21 +84,25 @@ def norm_quat(q):
 
 
 def layer_matrix(values, mode):
+    # Influence blends each value from identity, like an NLA strip in Replace mode.
+    w = values.get("influence", 1.0)
     if mode == 'QUATERNION':
-        return norm_quat(values["quat"]).to_matrix()
-    return Euler(values["rot"], mode).to_matrix()
+        q = values["quat"]
+        return norm_quat([1 - w + q[0] * w] + [c * w for c in q[1:]]).to_matrix()
+    return Euler([a * w for a in values["rot"]], mode).to_matrix()
 
 
-def reference(ob, layer_values):
+def reference(ob, values_per_layer):
     mode = ob.rotation_mode
     base = {"rot": ob.rotation_euler[:], "quat": ob.rotation_quaternion[:]}
     rot = layer_matrix(base, mode)
     loc = ob.location.copy()
     scale = ob.scale.copy()
-    for v in layer_values:
+    for v in values_per_layer:
+        w = v.get("influence", 1.0)
         rot = layer_matrix(v, mode) @ rot
-        loc += type(loc)(v["loc"])
-        scale = type(scale)([a * b for a, b in zip(scale, v["scale"])])
+        loc += type(loc)([a * w for a in v["loc"]])
+        scale = type(scale)([a * (1 - w + b * w) for a, b in zip(scale, v["scale"])])
     return Matrix.LocRotScale(loc, rot, scale)
 
 
@@ -152,7 +163,7 @@ def stacks_match_closed_form():
             ob = new_object(mode)
             randomize_base(ob)
             for _ in range(rng.randint(2, 6)):
-                add_layer(ob, rand_values())
+                add_layer(ob, rand_values(weighted=rng.random() < 0.7))
             for layer in ob.extra_transform.layers:
                 layer.enabled = rng.random() > 0.2
             update()
@@ -194,7 +205,7 @@ def animation_has_no_frame_lag():
     for frame in (1, 7, 13, 20, 4):
         bpy.context.scene.frame_set(frame)
         ev = evaluated(ob)
-        vals = [{ch: list(ev[stack.input_key(l, ch)]) for ch in stack.INPUTS} for l in ob.extra_transform.layers]
+        vals = [layer_values(ev, l) for l in ob.extra_transform.layers]
         worst = max(worst, diff(ev.matrix_basis, reference(ob, vals)))
     check("animated layers evaluate on the same frame", worst < TOL, f"max diff {worst:.3g}")
 
@@ -235,7 +246,7 @@ def merge_up_keeps_result():
         ob = new_object(mode)
         randomize_base(ob)
         for _ in range(3):
-            add_layer(ob, rand_values())
+            add_layer(ob, rand_values(weighted=True))
         update()
         before = evaluated(ob).matrix_world.copy()
         bpy.context.view_layer.objects.active = ob
@@ -252,7 +263,7 @@ def apply_and_bake_keep_result():
             ob = new_object(mode)
             randomize_base(ob)
             for _ in range(3):
-                add_layer(ob, rand_values())
+                add_layer(ob, rand_values(weighted=True))
             update()
             before = evaluated(ob).matrix_world.copy()
             bpy.context.view_layer.objects.active = ob
@@ -352,7 +363,7 @@ def native_operators_behave_like_native_delta():
                 randomize_base(ob)
                 ob.scale = [abs(s) + 0.5 for s in ob.scale]
                 for _ in range(layer_count):
-                    v = rand_values()
+                    v = rand_values(weighted=True)
                     v["scale"] = [abs(s) + 0.5 for s in v["scale"]]
                     add_layer(ob, v)
                 update()
@@ -428,7 +439,7 @@ def edits_and_playback_never_drop_a_value():
                 add_layer(ob, rand_values())
             update()
             for layer in ob.extra_transform.layers:
-                stack.write_inputs(ob, layer, rand_values())
+                stack.write_inputs(ob, layer, rand_values(weighted=True))
             update()
             vals = [stack.read_inputs(ob, l) for l in ob.extra_transform.layers]
             d = diff(evaluated(ob).matrix_basis, reference(ob, vals))
@@ -442,10 +453,10 @@ def edits_and_playback_never_drop_a_value():
         for _ in range(3):
             add_layer(ob, rand_values())
         for layer in ob.extra_transform.layers:
-            for ch in ("loc", "rot", "quat", "scale"):
+            for ch in stack.INPUTS:
                 key = stack.input_key(layer, ch)
                 for frame in (1, 10, 20):
-                    stack.write_inputs(ob, layer, {ch: rand_values()[ch]})
+                    stack.write_inputs(ob, layer, {ch: rand_values(weighted=True)[ch]})
                     ob.keyframe_insert(f'["{key}"]', frame=frame)
         obs.append(ob)
     misses = 0
@@ -453,7 +464,7 @@ def edits_and_playback_never_drop_a_value():
         bpy.context.scene.frame_set(frame)
         for ob in obs:
             ev = evaluated(ob)
-            vals = [{ch: list(ev[stack.input_key(l, ch)]) for ch in stack.INPUTS} for l in ob.extra_transform.layers]
+            vals = [layer_values(ev, l) for l in ob.extra_transform.layers]
             misses += diff(ev.matrix_basis, reference(ob, vals)) >= TOL
     check("playback is always picked up", misses == 0, f"{misses} misses of {100 * len(obs)}")
     bpy.context.scene.frame_set(1)
@@ -532,6 +543,71 @@ def files_from_0_1_0_are_renamed():
     check("legacy names migrate on the next update",
           not any(k.startswith("et_") for k in ob.keys()) and paths == ['["Extra 2 Euler Rotation"]'] * 3
           and diff(evaluated(ob).matrix_basis, reference(ob, vals)) < TOL, str(paths))
+
+
+@test
+def influence_scales_a_layer_like_a_weaker_delta():
+    # A single layer at influence w must equal a native Delta holding the blended values.
+    for mode in MODES:
+        worst = 0.0
+        for _ in range(10):
+            ob = new_object(mode)
+            randomize_base(ob)
+            v = rand_values(weighted=True)
+            add_layer(ob, v)
+            w = v["influence"]
+            q = v["quat"]
+            twin = native_twin(ob, {"loc": [a * w for a in v["loc"]], "rot": [a * w for a in v["rot"]],
+                                    "quat": [1 - w + q[0] * w] + [c * w for c in q[1:]],
+                                    "scale": [1 - w + a * w for a in v["scale"]]})
+            update()
+            worst = max(worst, diff(evaluated(ob).matrix_world, evaluated(twin).matrix_world))
+        check(f"single layer at partial influence == blended native delta [{mode}]", worst < TOL, f"{worst:.3g}")
+
+    ob = new_object('XYZ')
+    randomize_base(ob)
+    add_layer(ob, rand_values())
+    add_layer(ob, rand_values())
+    for layer in ob.extra_transform.layers:
+        stack.write_inputs(ob, layer, {"influence": 0.0})
+    update()
+    check("influence 0 everywhere leaves an identity delta", stack.delta_snapshot(evaluated(ob)) == stack.IDENTITY)
+
+    ui = ob.id_properties_ui(stack.input_key(ob.extra_transform.layers[0], "influence")).as_dict()
+    check("influence is a 0..1 factor", ui["subtype"] == 'FACTOR' and ui["min"] == 0.0 and ui["max"] == 1.0, str(ui))
+
+
+@test
+def layers_from_1_0_gain_an_influence():
+    ob = new_object('ZYX')
+    add_layer(ob, rand_values())
+    add_layer(ob, rand_values())
+    for layer in ob.extra_transform.layers:
+        del ob[stack.input_key(layer, "influence")]
+    update()
+    update()
+    vals = [stack.read_inputs(ob, l) for l in ob.extra_transform.layers]
+    check("missing influence is created at 1",
+          all(v["influence"] == 1.0 for v in vals) and diff(evaluated(ob).matrix_basis, reference(ob, vals)) < TOL)
+
+
+@test
+def max_layers_fit_the_driver_expressions():
+    ob = new_object('QUATERNION')
+    bpy.context.view_layer.objects.active = ob
+    for _ in range(stack.MAX_LAYERS):
+        bpy.ops.object.extra_transform_add()
+    try:
+        bpy.ops.object.extra_transform_add()
+        refused = False
+    except RuntimeError:  # the operator reports an error
+        refused = True
+    update()
+    longest = max(len(fc.driver.expression) for fc in ob.animation_data.drivers)
+    valid = all(fc.driver.is_valid and fc.driver.is_simple_expression for fc in ob.animation_data.drivers)
+    check(f"{stack.MAX_LAYERS} layers fit, one more is refused",
+          len(ob.extra_transform.layers) == stack.MAX_LAYERS and refused and longest <= 255 and valid,
+          f"longest expression {longest}")
 
 
 CHILD = """
@@ -619,7 +695,7 @@ def rendered_frames_use_the_animated_rotation():
 
     def grab(scene, depsgraph):
         ev = ob.evaluated_get(depsgraph)
-        vals = [{ch: list(ev[stack.input_key(l, ch)]) for ch in stack.INPUTS} for l in ob.extra_transform.layers]
+        vals = [layer_values(ev, l) for l in ob.extra_transform.layers]
         if depsgraph.mode == 'RENDER':  # the viewport also returns to the start frame afterwards
             rendered[scene.frame_current] = diff(ev.matrix_basis, reference(ob, vals))
 

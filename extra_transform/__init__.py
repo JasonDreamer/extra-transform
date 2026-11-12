@@ -32,10 +32,11 @@ def _remember_evaluated_delta(depsgraph, skip=()):
 def _needs_rebuild(ob):
     # Layer rotations are read in the object's rotation mode, like the native Delta,
     # so the drivers have to be regenerated whenever that mode changes. Layers whose
-    # property names lag behind their position (files from 0.1.0) are caught here too.
+    # property names lag behind their position (files from 0.1.0) or that lack an input
+    # added later (Influence) are caught here too.
     settings = ob.extra_transform
     return settings.built_mode != ob.rotation_mode or any(
-        l.slot != i + 1 for i, l in enumerate(settings.layers))
+        l.slot != i + 1 for i, l in enumerate(settings.layers)) or stack.inputs_missing(ob)
 
 
 # Objects changed from depsgraph_update_pre. A tag set there is not guaranteed to make
@@ -106,7 +107,7 @@ def _upgrade(*args):
     except AttributeError:
         return  # bpy.data is restricted while add-ons load at startup; load_post follows
     for ob in objects:
-        if stack.has_legacy_drivers(ob):
+        if stack.has_legacy_drivers(ob) or _needs_rebuild(ob):
             stack.rebuild(ob)
         else:
             stack.sync_rotation(ob, stack.scene_frame())

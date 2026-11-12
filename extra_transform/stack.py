@@ -20,19 +20,22 @@ from mathutils import Euler, Matrix, Quaternion
 LEGACY_GROUP = "ExtraTransform"
 DELTA_PATHS = ("delta_location", "delta_rotation_euler", "delta_rotation_quaternion", "delta_scale")
 EULER_ORDERS = ('XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX')
-# The scale driver multiplies one variable per layer in a 255-character expression.
-MAX_LAYERS = 100
+# The scale driver spends "(1-A+a*A)*" on each layer of a 255-character expression.
+MAX_LAYERS = 20
 
 INPUTS = {
     "loc": ((0.0, 0.0, 0.0), 'TRANSLATION'),
     "rot": ((0.0, 0.0, 0.0), 'EULER'),
     "quat": ((1.0, 0.0, 0.0, 0.0), 'QUATERNION'),
     "scale": ((1.0, 1.0, 1.0), 'XYZ'),
+    "influence": (1.0, 'FACTOR'),
 }
+LIMITS = {"influence": {"min": 0.0, "max": 1.0, "soft_min": 0.0, "soft_max": 1.0}}
 
 # Named like the native channels ("X Delta Location" -> "X Extra 2 Location") so the
 # Graph Editor reads naturally. The number is the layer's position in the stack.
-LABELS = {"loc": "Location", "rot": "Euler Rotation", "quat": "Quaternion Rotation", "scale": "Scale"}
+LABELS = {"loc": "Location", "rot": "Euler Rotation", "quat": "Quaternion Rotation", "scale": "Scale",
+          "influence": "Influence"}
 FCURVE_GROUP = "Object Transforms"
 
 
@@ -49,9 +52,17 @@ def input_path(layer, ch):
     return f'["{input_key(layer, ch)}"]'
 
 
+def is_array(ch):
+    return isinstance(INPUTS[ch][0], tuple)
+
+
 def input_paths(layer, ch):
     path = input_path(layer, ch)
-    return [f"{path}[{k}]" for k in range(len(INPUTS[ch][0]))]
+    return [f"{path}[{k}]" for k in range(len(INPUTS[ch][0]))] if is_array(ch) else [path]
+
+
+def _plain(ch, value):
+    return [float(x) for x in value] if is_array(ch) else float(value)
 
 
 def layer_paths(layers):
@@ -68,10 +79,8 @@ def new_layer(ob, name, values=None, index=None):
     layer = settings.layers.add()
     layer.uid = uuid.uuid4().hex[:8]
     layer.name = name
-    for ch, (default, subtype) in INPUTS.items():
-        key = input_key(layer, ch)
-        ob[key] = list(values[ch]) if values and ch in values else list(default)
-        ob.id_properties_ui(key).update(subtype=subtype, default=list(default))
+    for ch in INPUTS:
+        _create_input(ob, input_key(layer, ch), ch, values[ch] if values and ch in values else None)
     last = len(settings.layers) - 1
     if index is not None and index != last:
         settings.layers.move(last, index)
@@ -79,6 +88,24 @@ def new_layer(ob, name, values=None, index=None):
         index = last
     settings.active_index = index
     return settings.layers[index]
+
+
+def _create_input(ob, key, ch, value=None):
+    default, subtype = INPUTS[ch]
+    ob[key] = _plain(ch, default if value is None else value)
+    ob.id_properties_ui(key).update(subtype=subtype, default=_plain(ch, default), **LIMITS.get(ch, {}))
+
+
+def ensure_inputs(ob):
+    """Create inputs added in later versions (Influence, 1.1.0) on older layers."""
+    for layer in ob.extra_transform.layers:
+        for ch in INPUTS:
+            if input_key(layer, ch) not in ob:
+                _create_input(ob, input_key(layer, ch), ch)
+
+
+def inputs_missing(ob):
+    return any(input_key(l, ch) not in ob for l in ob.extra_transform.layers for ch in INPUTS)
 
 
 def unique_name(settings, name):
@@ -93,14 +120,19 @@ def unique_name(settings, name):
 
 
 def read_inputs(ob, layer):
-    return {ch: list(ob[input_key(layer, ch)]) for ch in INPUTS}
+    return {ch: _plain(ch, ob[input_key(layer, ch)]) for ch in INPUTS}
 
 
 def write_inputs(ob, layer, values):
     for ch, v in values.items():
         # Go through RNA like a UI edit does. Plain ob[key] writes skip the property
         # update, so dependent drivers are not reliably re-evaluated.
-        ob.path_resolve(input_path(layer, ch), False)[:] = list(v)
+        if is_array(ch):
+            ob.path_resolve(input_path(layer, ch), False)[:] = list(v)
+        else:
+            # A scalar has no RNA slice to write through, so tag the object by hand.
+            ob[input_key(layer, ch)] = float(v)
+            ob.update_tag()
 
 
 def remove_layer(ob, index):
@@ -132,7 +164,7 @@ def _rename_inputs(ob, layer, slot):
         if old == new or old not in ob:
             continue
         ui = ob.id_properties_ui(old).as_dict()
-        ob[new] = ob[old].to_list()
+        ob[new] = _plain(ch, ob[old])
         ob.id_properties_ui(new).update(**ui)
         del ob[old]
         if bag:
@@ -249,19 +281,34 @@ def _normalized_quat(q):
     return q.normalized() if q.magnitude != 0.0 else Quaternion((0.0, 1.0, 0.0, 0.0))
 
 
+def _contribution_matrix(v, mode):
+    w = v["influence"]
+    return Euler([a * w for a in v["rot"]], mode).to_matrix()
+
+
+def _contribution_quat(v):
+    # Same arithmetic as the single-layer drivers: blend from identity, then normalize.
+    w, q = v["influence"], v["quat"]
+    return _normalized_quat([1.0 - w + q[0] * w] + [c * w for c in q[1:]])
+
+
 def absorb_delta_write(ob, old, new):
     """Change the layers so the composed Delta becomes `new`, as the native Delta would hold it.
 
     A channel written to identity (Ctrl+A, Alt+G/R/S) clears that channel in every layer.
-    Any other write is solved into the outermost layer against the composition of the
-    layers below it, read in the object's *current* rotation mode, because some
-    operators (Transforms to Deltas) also change the mode in the same step.
+    Any other write is solved into the outermost layer with nonzero influence, against
+    the composition of the layers below it, read in the object's *current* rotation mode,
+    because some operators (Transforms to Deltas) also change the mode in the same step.
     """
     enabled = [l for l in ob.extra_transform.layers if l.enabled]
     vals = [read_inputs(ob, l) for l in enabled]
     if not vals:
         return
-    *inner, last = vals
+    live = [i for i, v in enumerate(vals) if v["influence"] != 0.0]
+    # Layers outside the target have zero influence and contribute nothing.
+    target = vals[live[-1]] if live else None
+    inner = vals[:live[-1]] if live else []
+    w = target["influence"] if live else 0.0
     mode = ob.rotation_mode
     (old_loc, old_eul, old_quat, old_scale), (loc, eul, quat, scale) = old, new
 
@@ -269,18 +316,20 @@ def absorb_delta_write(ob, old, new):
         if loc == IDENTITY[0]:
             for v in vals:
                 v["loc"] = [0.0, 0.0, 0.0]
-        else:
-            last["loc"] = [n - sum(v["loc"][k] for v in inner) for k, n in enumerate(loc)]
+        elif live:
+            target["loc"] = [(n - sum(v["loc"][k] * v["influence"] for v in inner)) / w
+                             for k, n in enumerate(loc)]
 
     if scale != old_scale:
         if scale == IDENTITY[3]:
             for v in vals:
                 v["scale"] = [1.0, 1.0, 1.0]
-        else:
+        elif live:
             for k, n in enumerate(scale):
-                below = math.prod(v["scale"][k] for v in inner)
+                below = math.prod(1.0 - v["influence"] + v["scale"][k] * v["influence"] for v in inner)
                 if below:
-                    last["scale"][k] = n / below
+                    x = n / below
+                    target["scale"][k] = x if w == 1.0 else (x - 1.0 + w) / w
 
     is_quat = mode == 'QUATERNION'
     rot, old_rot = (quat, old_quat) if is_quat else (eul, old_eul)
@@ -289,19 +338,26 @@ def absorb_delta_write(ob, old, new):
             for v in vals:
                 v["rot"] = [0.0, 0.0, 0.0]
                 v["quat"] = [1.0, 0.0, 0.0, 0.0]
-        elif not inner:
-            last["quat" if is_quat else "rot"] = list(rot)
-        elif is_quat:
-            below = Quaternion()
-            for v in inner:
-                below = _normalized_quat(v["quat"]) @ below
-            last["quat"] = list(_normalized_quat(quat) @ below.inverted())
-        else:
-            below = Matrix.Identity(3)
-            for v in inner:
-                below = Euler(v["rot"], mode).to_matrix() @ below
-            prev = Euler(last["rot"], mode)
-            last["rot"] = list((Euler(eul, mode).to_matrix() @ below.transposed()).to_euler(mode, prev))
+        elif live and is_quat:
+            if len(vals) == 1:
+                c = list(rot)
+            else:
+                below = Quaternion()
+                for v in inner:
+                    below = _contribution_quat(v) @ below
+                c = list(_normalized_quat(quat) @ below.inverted())
+            # Undo the blend from identity: 1 - w + q0*w = c0 and qi*w = ci.
+            target["quat"] = c if w == 1.0 else [(c[0] - 1.0 + w) / w] + [x / w for x in c[1:]]
+        elif live:
+            if len(vals) == 1:
+                e = list(rot)
+            else:
+                below = Matrix.Identity(3)
+                for v in inner:
+                    below = _contribution_matrix(v, mode) @ below
+                prev = Euler([a * w for a in target["rot"]], mode)
+                e = list((Euler(eul, mode).to_matrix() @ below.transposed()).to_euler(mode, prev))
+            target["rot"] = e if w == 1.0 else [a / w for a in e]
 
     for l, v in zip(enabled, vals):
         write_inputs(ob, l, v)
@@ -330,9 +386,8 @@ def _drive(ob, path, index, expression, variables, driver_type='SCRIPTED', use_s
 
 
 def _var_names(count):
-    letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    names = list(letters) + [a + b for a in letters for b in letters]
-    return names[:count]
+    """(value, influence) variable names per layer: a/A, b/B, ..."""
+    return [(c, c.upper()) for c in "abcdefghijklmnopqrstuvwxyz"[:count]]
 
 
 def clear_drivers(ob):
@@ -366,13 +421,14 @@ def scene_frame():
 def _input_at(ob, layer, ch, frame, curves):
     # Animated components are read from their F-Curves at `frame`: frame_change_pre runs
     # before animation is evaluated, so the property still holds the previous frame.
-    values = list(ob[input_key(layer, ch)])
+    value = _plain(ch, ob[input_key(layer, ch)])
+    values = value if is_array(ch) else [value]
     path = input_path(layer, ch)
     for k in range(len(values)):
         fc = curves.get((path, k))
         if fc and not fc.mute:
             values[k] = fc.evaluate(frame)
-    return values
+    return values if is_array(ch) else values[0]
 
 
 def composed_rotation(ob, frame=None):
@@ -380,14 +436,17 @@ def composed_rotation(ob, frame=None):
     layers = [l for l in ob.extra_transform.layers if l.enabled]
     mode = ob.rotation_mode
     curves = {} if frame is None else {(fc.data_path, fc.array_index): fc for fc in _fcurves(ob)}
+    ch = "quat" if mode == 'QUATERNION' else "rot"
+    vals = [{ch: _input_at(ob, l, ch, frame, curves), "influence": _input_at(ob, l, "influence", frame, curves)}
+            for l in layers]
     if mode == 'QUATERNION':
         q = Quaternion()
-        for l in layers:
-            q = _normalized_quat(_input_at(ob, l, "quat", frame, curves)) @ q
+        for v in vals:
+            q = _contribution_quat(v) @ q
         return "delta_rotation_quaternion", q
     m = Matrix.Identity(3)
-    for l in layers:
-        m = Euler(_input_at(ob, l, "rot", frame, curves), mode).to_matrix() @ m
+    for v in vals:
+        m = _contribution_matrix(v, mode) @ m
     return "delta_rotation_euler", m.to_euler(mode)
 
 
@@ -423,6 +482,7 @@ def rebuild(ob):
     clear_drivers(ob)
     reset_delta(ob)
     renumber(ob)
+    ensure_inputs(ob)
     group_fcurves(ob)
     ob.pop(LEGACY_GROUP, None)
 
@@ -430,13 +490,15 @@ def rebuild(ob):
     if not layers:
         return
 
-    # Location sums, scale multiplies (channel-wise, exactly like dloc / dscale).
+    # Location sums, scale multiplies (channel-wise, exactly like dloc / dscale). Influence
+    # blends each layer from its identity value; "1-A+a*A" is exactly a when A is 1.
     names = _var_names(len(layers))
+    weights = [(w, input_paths(l, "influence")[0]) for (_, w), l in zip(names, layers)]
     for k in range(3):
-        _drive(ob, "delta_location", k, None,
-               [(n, input_paths(l, "loc")[k]) for n, l in zip(names, layers)], driver_type='SUM')
-        _drive(ob, "delta_scale", k, "*".join(names),
-               [(n, input_paths(l, "scale")[k]) for n, l in zip(names, layers)])
+        _drive(ob, "delta_location", k, "+".join(f"{v}*{w}" for v, w in names),
+               [(v, input_paths(l, "loc")[k]) for (v, _), l in zip(names, layers)] + weights)
+        _drive(ob, "delta_scale", k, "*".join(f"(1-{w}+{v}*{w})" for v, w in names),
+               [(v, input_paths(l, "scale")[k]) for (v, _), l in zip(names, layers)] + weights)
 
     # Blender has no RNA for the axis-angle delta, and its own Delta panel hides rotation there too.
     if mode == 'AXIS_ANGLE':
@@ -444,10 +506,12 @@ def rebuild(ob):
 
     target, ch = ("delta_rotation_quaternion", "quat") if mode == 'QUATERNION' else ("delta_rotation_euler", "rot")
 
-    # One layer: pass the input straight through so Blender itself does the conversion.
+    # One layer: hand the input over so Blender itself does the conversion.
     if len(layers) == 1:
+        weight = ("A", input_paths(layers[0], "influence")[0])
         for k, src in enumerate(input_paths(layers[0], ch)):
-            _drive(ob, target, k, "v", [("v", src)])
+            expression = "1-A+a*A" if ch == "quat" and k == 0 else "a*A"
+            _drive(ob, target, k, expression, [("a", src), weight])
         return
 
     # Several layers: the handlers keep it current from here on (see the header).
@@ -459,16 +523,17 @@ def rebuild(ob):
 
 
 def compose(outer, inner, mode):
-    """Fold two layers' current values into one, applying `outer` after `inner`."""
+    """Fold two layers' current values into one at full influence, applying `outer` after `inner`."""
     order = mode if mode in EULER_ORDERS else 'XYZ'
-    inner_eul = Euler(inner["rot"], order)
-    rot = (Euler(outer["rot"], order).to_matrix() @ inner_eul.to_matrix()).to_euler(order, inner_eul)
-    quat = Quaternion(outer["quat"]).normalized() @ Quaternion(inner["quat"]).normalized()
+    wo, wi = outer["influence"], inner["influence"]
+    inner_eul = Euler([a * wi for a in inner["rot"]], order)
+    rot = (_contribution_matrix(outer, order) @ inner_eul.to_matrix()).to_euler(order, inner_eul)
     return {
-        "loc": [a + b for a, b in zip(outer["loc"], inner["loc"])],
+        "loc": [a * wo + b * wi for a, b in zip(outer["loc"], inner["loc"])],
         "rot": list(rot),
-        "quat": list(quat),
-        "scale": [a * b for a, b in zip(outer["scale"], inner["scale"])],
+        "quat": list(_contribution_quat(outer) @ _contribution_quat(inner)),
+        "scale": [(1.0 - wo + a * wo) * (1.0 - wi + b * wi) for a, b in zip(outer["scale"], inner["scale"])],
+        "influence": 1.0,
     }
 
 

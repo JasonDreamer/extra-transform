@@ -33,6 +33,7 @@ def draw_layer(layout, ob, layer):
     elif mode != 'AXIS_ANGLE':
         col.prop(ob, stack.input_path(layer, "rot"), text="Rotation")
     col.prop(ob, stack.input_path(layer, "scale"), text="Scale")
+    col.prop(ob, stack.input_path(layer, "influence"), text="Influence", slider=True)
 
 
 def draw_stack(layout, ob):

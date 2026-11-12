@@ -16,12 +16,23 @@ Each channel is composed independently. Rotating an outer (upper) layer does not
 | Scale | Product | Per axis |
 | Rotation | Product of matrices (or quaternions) | Outer layers multiply from the left |
 
+Each layer's influence (0 to 1) moves the layer's values linearly from their identity values (location 0, rotation 0, scale 1) before they are composed. This works like the influence of an NLA strip in Replace mode.
+
+| Channel | Value at influence w |
+| --- | --- |
+| Location | value × w |
+| Scale | 1 − w + value × w |
+| Euler rotation | each angle × w |
+| Quaternion rotation | (1 − w + W × w, X × w, Y × w, Z × w), normalized |
+
+At influence 1 the result is identical to a layer without influence.
+
 - **Rotation mode**: Follows the object's rotation mode. Changing the mode regenerates the drivers.
 - **Axis Angle**: The Delta has no rotation for this mode, so only location and scale are composed.
 
 ## 3. Data storage
 
-- Layer values are stored as custom properties on the object (e.g. `Extra 1 Location`).
+- Layer values are stored as custom properties on the object (e.g. `Extra 1 Location`, `Extra 1 Influence`).
 - The number matches the stack order. Reordering reassigns the property names and keyframe paths.
 - `bpy.props` is not used because drivers reading it cause an evaluation loop (circular dependency).
 
@@ -29,9 +40,9 @@ Each channel is composed independently. Rotating an outer (upper) layer does not
 
 Every driver is a single-stage simple expression: it reads layer values directly and writes straight to the Delta. No Python expressions are used, so there is no warning when Python auto-execution is off. With multiple stages, Blender 5.2's multithreaded evaluation drops writes.
 
-- **Location**: SUM driver
-- **Scale**: `a*b*c...` product expression (the 100-layer limit comes from the expression's length limit)
-- **Rotation (1 layer)**: Input passed through as is
+- **Location**: `a*A+b*B+...` expression (lowercase is the value, uppercase the influence)
+- **Scale**: `(1-A+a*A)*(1-B+b*B)*...` expression (the 20-layer limit comes from the expression's length limit)
+- **Rotation (1 layer)**: `a*A` expression (`1-A+a*A` for the quaternion's W)
 - **Rotation (2+ layers)**: Too complex for a simple expression, so there is no driver. The add-on's handlers compute it and write it to the Delta
 
 Rotation with two or more layers is computed when layer values change and right before each frame change (playback, rendering, and the in-between frames of motion blur). Keyframed values are read from their F-Curves at that frame. NLA strips and drivers on layer values can't be read from F-Curves, so they lag one frame or are not picked up.
@@ -42,7 +53,7 @@ Built-in transform operators write directly to the Delta, so the add-on writes t
 
 1. Cache the Delta values on every evaluation and detect changes.
 2. A channel that was cleared (0, or 1 for scale) is reset in every layer.
-3. Any other change replaces the outermost layer with the new value minus the inner layers' values.
+3. Any other change replaces the outermost layer with nonzero influence with the new value minus the inner layers' values.
 4. Reset the cache on Undo and file load.
 
 ## 6. Notes
@@ -51,4 +62,5 @@ Built-in transform operators write directly to the Delta, so the add-on writes t
 - **Without the add-on installed**:
   - Location and scale: Work normally.
   - Rotation (2+ layers): Stays at its saved value and does not animate.
+- **Layers made with 1.0.x**: They have no influence property, so one is added at influence 1 when the file is opened.
 - **Files saved with 1.0.0**: Rotation drivers used a Python function, so opening these files shows a warning. Opening them with the add-on replaces the drivers, and after saving again the warning no longer appears.
