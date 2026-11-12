@@ -679,43 +679,88 @@ def files_from_1_0_0_lose_the_python_driver():
 
 
 @test
-def rendered_frames_use_the_animated_rotation():
+def rendered_images_follow_keyed_layers():
+    # Measured on the rendered pixels: anything written to the original object during a
+    # render makes Blender re-evaluate it without its animation before drawing.
     import tempfile
+    import numpy as np
     scene = bpy.context.scene
-    ob = new_object('ZXY')
-    randomize_base(ob)
-    add_layer(ob, rand_values())
-    add_layer(ob, rand_values())
-    key = stack.input_key(ob.extra_transform.layers[1], "rot")
-    for frame, val in ((1, 0.0), (4, 2.5)):
-        ob[key] = [val, -val, val * 0.5]
-        ob.keyframe_insert(f'["{key}"]', frame=frame)
+    others = [o for o in scene.objects if not o.hide_render and o.type != 'CAMERA']
+    for o in others:
+        o.hide_render = True
+
+    def bar(y):
+        ob = new_object('XYZ')
+        for v in ob.data.vertices:
+            v.co.x *= 3
+        ob.location = (0, y, 0)
+        return ob
+
+    ob = bar(4)
+    add_layer(ob, {"loc": [-6, 0, 0], "rot": [0, 0, 0.3]})
+    add_layer(ob, {"rot": [0, 0, 0.5]})
+    a, b = ob.extra_transform.layers
+    keyed = ((a, "loc", [(1, [-6.0, 0, 0]), (4, [6.0, 0, 0])]),
+             (a, "influence", [(1, 0.3), (4, 1.0)]),
+             (b, "rot", [(1, [0, 0, 0.5]), (4, [0, 0, 1.4])]),
+             (b, "influence", [(1, 1.0), (4, 0.2)]))
+    for layer, ch, points in keyed:
+        for frame, value in points:
+            stack.write_inputs(ob, layer, {ch: value})
+            ob.keyframe_insert(stack.input_path(layer, ch), frame=frame)
+
+    # The twin carries the expected result as plain keyframes, one per frame.
+    twin = bar(-4)
+    frames = (1, 2, 3, 4)
+    for frame in frames:
+        scene.frame_set(frame)
+        m = reference(ob, [layer_values(evaluated(ob), l) for l in ob.extra_transform.layers])
+        twin.location = (m.translation.x, -4, 0)
+        twin.rotation_euler = m.to_euler()
+        twin.keyframe_insert("location", frame=frame)
+        twin.keyframe_insert("rotation_euler", frame=frame)
     scene.frame_set(1)
-    rendered = {}
 
-    def grab(scene, depsgraph):
-        ev = ob.evaluated_get(depsgraph)
-        vals = [layer_values(ev, l) for l in ob.extra_transform.layers]
-        if depsgraph.mode == 'RENDER':  # the viewport also returns to the start frame afterwards
-            rendered[scene.frame_current] = diff(ev.matrix_basis, reference(ob, vals))
-
+    cam = scene.camera
     render = scene.render
-    saved = (render.engine, render.resolution_x, render.resolution_y, scene.frame_start, scene.frame_end, render.filepath)
+    saved = (cam.location.copy(), cam.rotation_euler.copy(), cam.data.type, cam.data.ortho_scale, render.engine,
+             render.resolution_x, render.resolution_y, scene.frame_start, scene.frame_end, render.filepath)
+    cam.location, cam.rotation_euler = (0, 0, 30), (0, 0, 0)
+    cam.data.type, cam.data.ortho_scale = 'ORTHO', 24
     render.engine = 'BLENDER_WORKBENCH'
-    render.resolution_x = render.resolution_y = 8
-    scene.frame_start, scene.frame_end = 1, 4
-    render.filepath = os.path.join(tempfile.mkdtemp(), "f")
-    bpy.app.handlers.frame_change_post.append(grab)
+    render.resolution_x = render.resolution_y = 240
+    scene.frame_start, scene.frame_end = frames[0], frames[-1]
+    out = os.path.join(tempfile.mkdtemp(), "f")
+    render.filepath = out
     try:
         bpy.ops.render.render(animation=True)
     finally:
-        bpy.app.handlers.frame_change_post.remove(grab)
-        (render.engine, render.resolution_x, render.resolution_y,
-         scene.frame_start, scene.frame_end, render.filepath) = saved
-    worst = max(rendered.values(), default=1.0)
-    check("each rendered frame has its own rotation", sorted(rendered) == [1, 2, 3, 4] and worst < TOL,
-          f"frames {sorted(rendered)} max diff {worst:.3g}")
+        (cam.location, cam.rotation_euler, cam.data.type, cam.data.ortho_scale, render.engine,
+         render.resolution_x, render.resolution_y, scene.frame_start, scene.frame_end, render.filepath) = saved
+        for o in others:
+            o.hide_render = False
+
+    def shape(mask):
+        ys, xs = np.nonzero(mask)
+        cx, cy = xs.mean(), ys.mean()
+        cov = np.cov(np.stack([xs - cx, ys - cy]))
+        return cx, 0.5 * math.atan2(2 * cov[0, 1], cov[0, 0] - cov[1, 1])
+
+    worst_px = worst_deg = 0.0
+    for frame in frames:
+        im = bpy.data.images.load(f"{out}{frame:04d}.png")
+        px = np.array(im.pixels[:]).reshape(im.size[1], im.size[0], 4)
+        bpy.data.images.remove(im)
+        lum = px[..., :3].mean(-1)
+        mask = lum > lum.mean() + 0.1
+        h = mask.shape[0]
+        (x1, a1), (x2, a2) = shape(mask[h // 2:]), shape(mask[:h // 2])  # rows run bottom-up
+        worst_px = max(worst_px, abs(x1 - x2))
+        worst_deg = max(worst_deg, abs(math.degrees(a1 - a2)))
+    check("rendered frames match plain keyframes", worst_px < 1.0 and worst_deg < 1.0,
+          f"max offset {worst_px:.2f}px, max angle {worst_deg:.2f} deg")
     scene.frame_set(1)
+
 
 
 print(f"\n{len(failures)} failure(s)" + (f": {failures}" if failures else ""))

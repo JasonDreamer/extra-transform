@@ -54,7 +54,9 @@ Built-in transform operators write directly to the Delta, so the add-on writes t
 1. Cache the Delta values on every evaluation and detect changes.
 2. A channel that was cleared (0, or 1 for scale) is reset in every layer.
 3. Any other change replaces the outermost layer with nonzero influence with the new value minus the inner layers' values.
-4. Reset the cache on Undo and file load.
+4. Reset the cache on Undo, file load, and when a render ends.
+
+While rendering, the add-on stops this and writes nothing to the object (except the per-frame rotation of two or more layers). Writing to an object during a render makes Blender re-evaluate it without applying its keyframes.
 
 ## 6. Notes
 

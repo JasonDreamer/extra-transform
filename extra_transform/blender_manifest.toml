@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "extra_transform"
-version = "1.1.0"
+version = "1.1.1"
 name = "Extra Transform"
 tagline = "Stack up to 20 Delta Transforms on an object"
 maintainer = "Jason"

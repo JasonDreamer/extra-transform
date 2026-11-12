@@ -44,9 +44,17 @@ def _needs_rebuild(ob):
 # until an evaluation has really used the new values.
 _changed_in_pre = set()
 
+# Any write to an original object during a render tags it, and the render re-evaluates
+# it before drawing without running its animation: keyed layer values fall back to the
+# original's stale ones. So while rendering, the add-on only writes the multi-layer
+# rotation from frame_change_pre, which runs before each frame is evaluated.
+_rendering = False
+
 
 @persistent
 def _on_depsgraph_update_pre(scene, depsgraph):
+    if _rendering:
+        return
     frame = scene.frame_current_final
     for ob in _layered_objects():
         seen = stack.expected.get(ob.session_uid)
@@ -65,6 +73,8 @@ def _on_depsgraph_update_pre(scene, depsgraph):
 
 @persistent
 def _on_depsgraph_update_post(scene, depsgraph):
+    if _rendering:
+        return
     stale = set(_changed_in_pre)
     _changed_in_pre.clear()
     for ob in _layered_objects():
@@ -89,7 +99,21 @@ def _on_frame_change_pre(scene, depsgraph):
 
 @persistent
 def _on_frame_change_post(scene, depsgraph):
-    _remember_evaluated_delta(depsgraph)
+    if not _rendering:
+        _remember_evaluated_delta(depsgraph)
+
+
+@persistent
+def _on_render_start(*args):
+    global _rendering
+    _rendering = True
+
+
+@persistent
+def _on_render_end(*args):
+    global _rendering
+    _rendering = False
+    stack.expected.clear()  # the viewport re-learns the Delta on its next update
 
 
 @persistent
@@ -124,6 +148,9 @@ HANDLERS = (
     ("redo_post", _forget),
     ("load_pre", _forget),
     ("load_post", _upgrade),
+    ("render_init", _on_render_start),
+    ("render_complete", _on_render_end),
+    ("render_cancel", _on_render_end),
 )
 
 
